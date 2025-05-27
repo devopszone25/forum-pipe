@@ -127,7 +127,7 @@ spec:
           command: ['sh', '-c', 'until nc -z mysql-service 3306; do echo waiting for mysql; sleep 5; done;']
       containers:
         - name: laravel
-          image: your-dockerhub-username/forum-pipe-main:latest
+          image: devopszone25/forum-pipe-app:latest
           ports:
             - containerPort: 9000
           env:
