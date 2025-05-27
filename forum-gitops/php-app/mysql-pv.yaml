@@ -1,0 +1,27 @@
+# PersistentVolume for MySQL using NFS
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mysql-pv
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    server: 192.168.245.153
+    path: /srv/nfs/mysql
+
+---
+# PersistentVolumeClaim for MySQL
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  volumeName: mysql-pv
