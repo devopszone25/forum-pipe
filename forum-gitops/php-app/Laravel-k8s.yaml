@@ -1,0 +1,312 @@
+---
+# PersistentVolume for MySQL using NFS
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mysql-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  nfs:
+    server: 192.168.245.153
+    path: /nfs/mysql
+  persistentVolumeReclaimPolicy: Retain
+
+---
+# PersistentVolumeClaim for MySQL
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  volumeName: mysql-pv
+
+---
+# Secret for database credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: laravel-secrets
+type: Opaque
+stringData:
+  db_name: laravel
+  db_user: laravel_user
+  db_password: laravel_password
+  db_root: rootpassword
+
+---
+# MySQL Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: db_root
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: db_name
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: db_user
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: db_password
+          volumeMounts:
+            - name: mysql-storage
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: mysql-storage
+          persistentVolumeClaim:
+            claimName: mysql-pvc
+
+---
+# MySQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+spec:
+  selector:
+    app: mysql
+  ports:
+    - protocol: TCP
+      port: 3306
+      targetPort: 3306
+
+---
+# Laravel App Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: laravel
+  template:
+    metadata:
+      labels:
+        app: laravel
+    spec:
+      initContainers:
+        - name: wait-for-mysql
+          image: busybox
+          command: ['sh', '-c', 'until nc -z mysql-service 3306; do echo waiting for mysql; sleep 5; done;']
+      containers:
+        - name: laravel
+          image: your-dockerhub-username/forum-pipe-main:latest
+          ports:
+            - containerPort: 9000
+          env:
+            - name: APP_ENV
+              value: "production"
+            - name: APP_DEBUG
+              value: "false"
+            - name: DB_CONNECTION
+              value: "mysql"
+            - name: DB_HOST
+              value: "mysql-service"
+            - name: DB_PORT
+              value: "3306"
+            - name: DB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: db_name
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: db_user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: db_password
+          command: ["/usr/local/bin/docker-entrypoint.sh"]
+          args: ["php-fpm"]
+
+---
+# Laravel App Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: laravel-service
+spec:
+  selector:
+    app: laravel
+  ports:
+    - protocol: TCP
+      port: 9000
+      targetPort: 9000
+
+---
+# ConfigMap for Nginx configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+data:
+  default.conf: |
+    server {
+        listen 80;
+        index index.php index.html;
+        server_name localhost;
+
+        root /var/www/public;
+
+        location / {
+            try_files $uri $uri/ /index.php?$query_string;
+        }
+
+        location ~ \.php$ {
+            include fastcgi_params;
+            fastcgi_pass laravel-service:9000;
+            fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+            fastcgi_param DOCUMENT_ROOT $realpath_root;
+        }
+
+        location ~ /\.ht {
+            deny all;
+        }
+    }
+
+---
+# Nginx Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-config-volume
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: nginx-config-volume
+          configMap:
+            name: nginx-config
+
+---
+# Nginx Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+spec:
+  selector:
+    app: nginx
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+
+---
+# Ingress Resource
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: laravel-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+    - host: laravel.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nginx-service
+                port:
+                  number: 80
+
+---
+# Horizontal Pod Autoscaler for Laravel
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: laravel-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: laravel-deployment
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+
+---
+# NetworkPolicy to restrict external access
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: laravel-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: laravel
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: nginx
+      ports:
+        - protocol: TCP
+          port: 9000
+  policyTypes:
+    - Ingress
